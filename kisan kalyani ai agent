@@ -1,0 +1,301 @@
+import os
+import requests
+import json
+from datetime import datetime
+
+# --- CrewAI Imports ---
+from crewai import Agent, Task, Crew, Process
+from crewai.tools import Tool
+from pydantic import BaseModel
+from typing import List
+
+# --- LLM Configuration (Required for the Ministry Liaison Agent) ---
+# NOTE: Replace '' with your actual Gemini API Key, or set it as an environment variable
+# The agent needs an LLM to perform the complex task of formal complaint drafting.
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
+GEMINI_API_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent"
+
+# CrewAI expects an LLM configuration, even if we are using a tool function
+# for a specific LLM call. For the overall crew operation, we will assume
+# the LLM is configured. If using CrewAI's native LLM setup, you'd use
+# llm = LLM(model='gemini/gemini-2.5-flash-preview-09-2025', api_key=GEMINI_API_KEY)
+# For this example, we will proceed with the tools handling the core logic.
+
+# --- 1. TOOL DEFINITIONS (Simulated External APIs and Scheduling) ---
+
+def fetch_crop_data(state: str, crop: str) -> str:
+    """Simulates fetching real-time crop value, yield estimates, and historical trends for a state/crop."""
+    print(f"--- TOOL: Fetching market data for {crop} in {state}...")
+    # In a real application, this would call a market API (e.g., USDA NASS, Mandi APIs).
+    if state.lower() == "maharashtra" and crop.lower() == "soybean":
+        data = {
+            "current_value": 5200,
+            "trend": "upward (+3% this month)",
+            "yield_forecast": "Above average (15% increase)",
+            "risk": "Moderate due to monsoon delays"
+        }
+        return (f"Market Data Report: {crop} in {state}. Current Value per Quintal: ₹{data['current_value']}. "
+                f"Trend: {data['trend']}. Yield Forecast: {data['yield_forecast']}."
+                f"Summary: Value is high. Consider selling 50% after next scheduled watering.")
+    return f"Market data for {crop} in {state} is currently unavailable or requires specific API access."
+
+def fetch_land_price(state: str) -> str:
+    """Simulates fetching the latest agricultural land price updates for a region."""
+    print(f"--- TOOL: Fetching land price data for {state}...")
+    # In a real app, this would query a land registry or property data service.
+    if state.lower() == "maharashtra":
+        return ("Land Price Update: Agricultural land in prime zones of Maharashtra "
+                "saw an average increase of 7% in the last quarter. Non-irrigated land "
+                "prices remain stable. The current average rate is approximately ₹4.5 Lakhs per Acre.")
+    return f"Land price data for {state} is generic. Analyst suggests querying specific district records."
+
+def get_weather_forecast(state: str) -> str:
+    """Simulates fetching a 7-day weather forecast and identifies risk factors."""
+    print(f"--- TOOL: Fetching 7-day weather forecast for {state}...")
+    # In a real app, this would use a hyperlocal weather API (e.g., OpenWeather, Tomorrow.io).
+    if state.lower() == "maharashtra":
+        return ("7-Day Forecast: Clear skies for 5 days, then heavy rainfall predicted on Day 6 & 7. "
+                "Temperature high: 32°C. Humidity: 65-75%. "
+                "**Tentative Warning:** High chance of flooding on low-lying plots starting Day 6. "
+                "Pesticide spraying is optimal on Day 4.")
+    return f"Weather forecast for {state} is currently mild. No immediate warnings."
+
+def compare_fertilizer_prices(product: str) -> str:
+    """Simulates checking multiple vendors for the cheapest agricultural product."""
+    print(f"--- TOOL: Comparing prices for {product}...")
+    # In a real app, this would scrape e-commerce sites or use vendor APIs.
+    if "urea" in product.lower():
+        prices = {"AgriMart": 1200, "FarmSupply.co": 1150, "LocalStore": 1250}
+        cheapest_vendor = min(prices, key=prices.get)
+        cheapest_price = prices[cheapest_vendor]
+        return (f"Procurement Report for {product}: Found cheapest rate at **{cheapest_vendor}** "
+                f"for ₹{cheapest_price} per bag. Savings of ₹100 compared to the highest quote.")
+    return f"No competitive prices found for {product}. Recommending local market check."
+
+def schedule_task(task_description: str) -> str:
+    """Simulates setting a reminder/schedule in a calendar or database."""
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    print(f"--- TOOL: Scheduling task: {task_description}")
+    # In a real app, this would interact with Google Calendar API or a Firestore database.
+    return f"SCHEDULE SET: '{task_description}' confirmed for your farm. Set at {timestamp}."
+
+def format_complaint_llm(issue_text: str) -> str:
+    """
+    Uses the Gemini API to take a farmer's raw issue and format it into a formal
+    letter addressed to the State Agricultural Ministry.
+    """
+    if not GEMINI_API_KEY:
+        return "ERROR: Gemini API Key not found. Cannot format complaint."
+
+    print("--- TOOL: Drafting Formal Complaint using LLM...")
+    
+    # System Instruction: Define the LLM's role and tone
+    system_prompt = (
+        "You are a highly professional government administrative assistant. "
+        "Your task is to convert a farmer's informal problem description into a formal, "
+        "well-structured complaint letter addressed to the 'State Agricultural Ministry, [STATE]'. "
+        "The output must include a formal Subject line, a Salutation, a detailed Body Paragraphs describing "
+        "the issue and its impact, and a formal Closing with a clear 'Requested Recourse'."
+        "Output ONLY the formal letter text."
+    )
+    
+    # User Query: The farmer's informal input
+    user_query = f"The farmer's issue is: '{issue_text}'. Please draft the formal letter now."
+
+    payload = {
+        "contents": [{"parts": [{"text": user_query}]}],
+        "systemInstruction": {"parts": [{"text": system_prompt}]},
+    }
+
+    try:
+        response = requests.post(
+            GEMINI_API_URL,
+            headers={'Content-Type': 'application/json'},
+            params={'key': GEMINI_API_KEY},
+            data=json.dumps(payload),
+            timeout=30
+        )
+        response.raise_for_status()
+        result = response.json()
+        
+        # Extract the generated text
+        generated_text = result.get('candidates', [{}])[0].get('content', {}).get('parts', [{}])[0].get('text', 'LLM response failed.')
+        return generated_text
+        
+    except requests.exceptions.RequestException as e:
+        return f"ERROR: Failed to connect to Gemini API for complaint drafting: {e}"
+
+
+# Define the tools using the CrewAI Tool decorator
+market_tools = [
+    Tool(
+        name="Crop Market Data Fetcher",
+        func=fetch_crop_data,
+        description="Useful for fetching the latest price and yield forecast for a specific crop and state."
+    ),
+    Tool(
+        name="Land Price Tracker",
+        func=fetch_land_price,
+        description="Useful for getting quarterly updates on agricultural land value in a given state or region."
+    )
+]
+
+scheduling_tools = [
+    Tool(
+        name="Weather Forecaster",
+        func=get_weather_forecast,
+        description="Useful for getting a 7-day weather outlook and potential hazard warnings."
+    ),
+    Tool(
+        name="Task Scheduler",
+        func=schedule_task,
+        description="Use this tool to set a concrete date/time reminder for spraying, harvesting, or fertilizing."
+    )
+]
+
+procurement_tools = [
+    Tool(
+        name="Price Comparator",
+        func=compare_fertilizer_prices,
+        description="Use this to compare costs across various simulated vendors and find the cheapest agricultural product or fertilizer."
+    )
+]
+
+liaison_tool = Tool(
+    name="Formal Complaint Drafter",
+    func=format_complaint_llm,
+    description="The ONLY tool to be used for formalizing a farmer's raw issue into a professional letter for a Ministry or Authority."
+)
+
+
+# --- 2. AGENT DEFINITIONS ---
+
+# The core LLM logic is encapsulated in the tools, but we must provide an LLM
+# for the CrewAI agent to reason and decide which tools to use.
+llm_config = {
+    "model": "gemini-2.5-flash",
+    "api_key": GEMINI_API_KEY,
+    "temperature": 0.2
+}
+
+# In a real CrewAI setup, you would pass a configured LLM instance here.
+# For simplicity and to focus on the tool execution, we use placeholders.
+class AgentLLMPlaceholder(BaseModel):
+    name: str = "PlaceholderLLM"
+    def invoke(self, *args, **kwargs):
+        return "LLM logic completed via tool call."
+
+llm_instance = AgentLLMPlaceholder()
+
+
+market_analyst = Agent(
+    role='Agricultural Market Analyst',
+    goal='Provide accurate crop value tracking and updated land price information for farm optimization.',
+    backstory=(
+        "You are a seasoned economist specializing in agricultural commodity and land markets. "
+        "You provide concise, actionable financial insights to farmers."
+    ),
+    tools=market_tools,
+    verbose=True,
+    llm=llm_instance
+)
+
+agri_scheduler = Agent(
+    role='Precision Farming Scheduler',
+    goal='Determine the optimal timing for spraying and fertilizing based on climate prediction and set the corresponding schedule reminders.',
+    backstory=(
+        "You are a meticulous agronomist focused on maximizing yield through timely intervention. "
+        "You leverage future weather data to create precise schedules."
+    ),
+    tools=scheduling_tools,
+    verbose=True,
+    llm=llm_instance
+)
+
+procurement_specialist = Agent(
+    role='Farm Procurement Specialist',
+    goal='Find the absolute cheapest source for any requested fertilizer or agricultural supply product.',
+    backstory=(
+        "You are an expert purchasing agent with deep knowledge of supplier networks. "
+        "Your mission is to minimize input costs for the farmer."
+    ),
+    tools=procurement_tools,
+    verbose=True,
+    llm=llm_instance
+)
+
+ministry_liaison = Agent(
+    role='Government Relations Officer',
+    goal='Formalize and structure farmer complaints into professional letters suitable for submission to the State Agricultural Ministry.',
+    backstory=(
+        "You are an experienced public relations expert. You bridge the gap between farmers and bureaucracy "
+        "by drafting compelling, formal correspondence."
+    ),
+    tools=[liaison_tool],
+    verbose=True,
+    llm=llm_instance # The actual LLM call is within the tool, but the agent uses the LLM to decide when to call the tool.
+)
+
+
+# --- 3. TASK DEFINITIONS ---
+
+# Scenario Inputs
+FARM_STATE = "Maharashtra"
+CROP_TYPE = "Soybean"
+FERTILIZER_PRODUCT = "Urea Fertilizer 50kg bag"
+FARMER_ISSUE = ("The canal water supply has been cut off for 5 days without notice, "
+                "and my lower field crops are starting to dry out. This is unacceptable and must be fixed.")
+
+task_market_analysis = Task(
+    description=f"Analyze the market for {CROP_TYPE} in {FARM_STATE}. Include the current value and the latest land price update for the region.",
+    agent=market_analyst,
+    expected_output='A two-part financial report: 1) Crop market summary with price/yield advice, and 2) Land price update.'
+)
+
+task_scheduling_and_warning = Task(
+    description=(
+        f"Get the 7-day weather forecast for {FARM_STATE}. Based on the forecast, provide a clear 'Tentative Warning' for any climate risk (flood/drought/pest) AND schedule an optimal day for general spraying/fertilizing."
+    ),
+    agent=agri_scheduler,
+    context=[task_market_analysis], # Provide market context to the scheduler
+    expected_output='A schedule confirmation for the optimal spray day AND a detailed climate warning.'
+)
+
+task_procurement = Task(
+    description=f"Find the cheapest vendor for '{FERTILIZER_PRODUCT}' and recommend the best place to order.",
+    agent=procurement_specialist,
+    expected_output='A clear, concise report on the cheapest vendor, price, and recommended action.'
+)
+
+task_complaint = Task(
+    description=(
+        f"Take the farmer's raw issue: '{FARMER_ISSUE}' and use the 'Formal Complaint Drafter' tool to "
+        f"generate a professional, high-impact letter to the State Agricultural Ministry."
+    ),
+    agent=ministry_liaison,
+    expected_output='The complete, formally drafted complaint letter ready for submission.'
+)
+
+# --- 4. CREW ORCHESTRATION ---
+
+# Assemble the crew with a sequential process
+agri_crew = Crew(
+    agents=[market_analyst, agri_scheduler, procurement_specialist, ministry_liaison],
+    tasks=[task_market_analysis, task_scheduling_and_warning, task_procurement, task_complaint],
+    process=Process.sequential,  # Tasks run one after the other
+    verbose=2  # High verbosity to see the agents' reasoning and tool use
+)
+
+# Kick off the crew's work
+print("###################################################")
+print("## Starting the Agri-Tech Agent Crew Execution... ##")
+print("###################################################")
+print(f"**Scenario:** Farm in {FARM_STATE}, growing {CROP_TYPE}. Needs financial update, schedule, procurement, and help with a crisis.")
+
+# The crew runs all defined tasks in sequence
+result = agri_crew.kickoff()
+
+print("\n\n###################################################")
+print("## AGENT CREW FINAL REPORT ##")
+print("###################################################")
+print(result)
